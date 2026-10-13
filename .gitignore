@@ -1,0 +1,19 @@
+# Build outputs
+out/
+bin/
+*.class
+
+# Frontend dependencies and builds
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# Temporary and log files
+sources.txt
+*.log
+.DS_Store
+
+# IDE caches
+.idea/
+*.iml
+.vscode/
