@@ -2,6 +2,7 @@ import { Routes, Route } from 'react-router-dom'
 import Navbar from './components/Navbar'
 import BackgroundEffect from './components/BackgroundEffect'
 import Dashboard from './pages/Dashboard'
+import DatasetPage from './pages/DatasetPage'
 import Module1Page from './pages/Module1Page'
 import Module2Page from './pages/Module2Page'
 import Module3Page from './pages/Module3Page'
@@ -22,6 +23,7 @@ function App() {
       <div className="app-main">
         <Routes>
           <Route path="/" element={<Dashboard />} />
+          <Route path="/datasets" element={<DatasetPage />} />
           <Route path="/module1" element={<Module1Page />} />
           <Route path="/module2" element={<Module2Page />} />
           <Route path="/module3" element={<Module3Page />} />
@@ -35,3 +37,4 @@ function App() {
 }
 
 export default App
+

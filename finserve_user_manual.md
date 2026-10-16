@@ -103,16 +103,31 @@ Every file in the repository is cataloged below with its purpose, implemented al
 
 ---
 
-### 2.3 Data Layer & Synthesizer
+### 2.3 Data Layer, Dataset Presets & Kaggle Compatibility
 
 #### [`src/com/finserve/data/SampleDataGenerator.java`](file:///Users/meherbhoyar/Desktop/FinServe/src/com/finserve/data/SampleDataGenerator.java)
-- **Role**: Realistic in-memory banking dataset generator.
+- **Role**: Realistic in-memory default banking dataset generator.
 - **Functionality**:
   - Deterministic pseudo-random generation using `new Random(42)`.
   - Generates 100 transaction records, 20 high-net-worth accounts across major Indian financial hubs (Mumbai, Bangalore, Delhi, Chennai, etc.).
   - Generates 4 detailed corporate compliance filings and audit reports.
   - Maintains master watchlist of AML/CFT indicators (`"shell company"`, `"structuring"`, `"smurfing"`, `"round-tripping"`, etc.).
   - Concatenates transaction narratives into indexed search corpora.
+
+#### [`src/com/finserve/data/DatasetPresets.java`](file:///Users/meherbhoyar/Desktop/FinServe/src/com/finserve/data/DatasetPresets.java)
+- **Role**: Specialized banking dataset generators modeled after real Kaggle financial fraud and transaction datasets.
+- **Presets Available**:
+  - **AML Suspicious Activity Dataset**: 250 transactions with elevated fraud signals — shell corporation transfers, smurfing below regulatory thresholds, multi-layered international wires, and emergency cash overrides.
+  - **Global SWIFT & Forex Dataset**: 200 high-value cross-border settlements across 12 global currencies (USD, EUR, GBP, JPY, CHF, SGD, AED, etc.) with correspondent banking chains.
+  - **Retail High-Volume Dataset**: 500 consumer retail transactions across UPI, credit/debit card POS, EMIs, and e-commerce payments.
+
+#### [`src/com/finserve/data/DatasetManager.java`](file:///Users/meherbhoyar/Desktop/FinServe/src/com/finserve/data/DatasetManager.java)
+- **Role**: Central thread-safe dataset registry and dynamic data loader.
+- **Functionality**:
+  - Manages active in-memory ledger records, bank accounts, and compliance dossiers.
+  - Dispatches active dataset instances to all 6 algorithm modules dynamically.
+  - Parses uploaded CSV and JSON files with fuzzy column matching (compatible with Kaggle's *Bank Transaction Dataset for Fraud Detection*).
+  - Automatically synthesizes bank accounts and regulatory audit reports when custom transaction CSVs are uploaded without account tables.
 
 ---
 
@@ -333,12 +348,66 @@ You can run the frontend from IntelliJ using the integrated terminal or an npm R
 
 ### Step 6: Access and Verify the Platform
 - **Interactive UI**: Open your browser to [http://localhost:5173](http://localhost:5173).
+- **Dataset Manager**: Open [http://localhost:5173/datasets](http://localhost:5173/datasets) to switch datasets or upload Kaggle CSVs.
+- **Swagger Documentation**: [http://localhost:8080/swagger](http://localhost:8080/swagger) for interactive API testing.
 - **Backend Health Check**: [http://localhost:8080/api/health](http://localhost:8080/api/health) or via the frontend proxy [http://localhost:5173/api/health](http://localhost:5173/api/health).
 - Both servers should indicate green/online status.
 
 ---
 
-## 5. Troubleshooting & IntelliJ Gotchas
+## 5. Dataset Management & Kaggle Datasets Integration Guide
+
+FinServe features a centralized `DatasetManager` that connects all 6 algorithm modules to dynamic, real-world banking datasets. Switching datasets in the UI immediately re-indexes the algorithms across all modules.
+
+### 5.1 Curated Preset Datasets
+| Preset Name | ID | Volume | Description | Best Suited Modules |
+| :--- | :--- | :--- | :--- | :--- |
+| **Bank Transactions Data 2 (Default)** | `default` | 2,512 txns, 595 accounts | Primary real-world dataset loaded automatically on server boot from `bank_transactions_data_2.csv`. Contains customer age/occupation, account balances, failed login counts, and merchant IDs. | All Modules (primary production baseline) |
+| **AML Suspicious Activity Dataset** | `aml-suspicious` | 250 txns, 40 accounts | High density of financial crime signals: structuring, shell companies, offshore layering, crypto P2P. | Module 1 (Fraud Detection), Module 5 (Compliance Rules) |
+| **Global SWIFT & Forex Dataset** | `swift-forex` | 200 txns, 30 accounts | Large cross-border interbank transfers across 12 currencies (USD, EUR, GBP, SGD, CHF, AED) with correspondent chains. | Module 4 (Network Flow), Module 2 (Document Archival) |
+| **Retail High-Volume Dataset** | `retail-highvol` | 500 txns, 60 accounts | High-frequency consumer payments: UPI, card POS, EMIs, and utility settlements. | Module 6 (Parallel Analytics), Module 3 (Data Cleansing) |
+| **Synthetic Indian Banking Dataset** | `synthetic-100` | 100 txns, 20 accounts | Lightweight synthetic baseline covering Indian metro banking branches. | Quick testing & verification |
+
+### 5.2 Uploading Real Kaggle Banking Datasets
+FinServe supports direct drag-and-drop ingestion of Kaggle financial datasets, such as:
+- **Kaggle**: `valakhorasani/bank-transaction-dataset-for-fraud-detection`
+- **Kaggle**: `ealaxi/paysim1` (Synthetic Financial Datasets for Fraud Detection)
+- **Kaggle**: `mlg-ulb/creditcardfraud` (Credit Card Fraud Detection)
+
+#### Flexible Header Normalization
+The ingestion engine in `DatasetManager.java` normalizes and automatically maps column headers:
+- `TransactionID` $\leftarrow$ `transaction_id`, `id`, `txnid`, `transid`, `refno`
+- `SenderAccount` $\leftarrow$ `sender`, `customer_id`, `account_id`, `from_account`, `custid`
+- `ReceiverAccount` $\leftarrow$ `receiver`, `recipient_id`, `merchant_id`, `to_account`, `target`
+- `Amount` $\leftarrow$ `transaction_amount`, `value`, `amt`, `transfer_amount`
+- `TransactionType` $\leftarrow$ `channel`, `type`, `payment_method`, `method` (maps to `UPI`, `WIRE`, `CARD`, `SWIFT`, `NEFT`, `RTGS`)
+- `Status` $\leftarrow$ `status`, `is_fraud`, `fraud`, `flagged` (`1` or `true` maps to `FLAGGED`)
+- `Description` $\leftarrow$ `description`, `memo`, `narration`, `location`, `merchant_name`
+- `Timestamp` $\leftarrow$ `date`, `datetime`, `timestamp`, `time`
+
+#### Automatic Account & Dossier Synthesis
+When a user uploads a transaction-only CSV (common on Kaggle), FinServe automatically:
+1. Synthesizes full `Account` entities for every unique sender and beneficiary.
+2. Synthesizes regulatory audit dossiers and AML compliance reports referencing the uploaded dataset.
+3. This guarantees that **all 6 modules remain 100% functional** on custom datasets.
+
+### 5.3 Ready-to-Test Sample Files
+A realistic Kaggle fraud dataset is pre-bundled in the repository:
+- [`sample_datasets/kaggle_bank_transactions_sample.csv`](file:///Users/meherbhoyar/Desktop/FinServe/sample_datasets/kaggle_bank_transactions_sample.csv)
+- In the UI at `/datasets`, click **"Load Kaggle Bank Fraud Sample Dataset"** to ingest it instantly, or click **"Download Sample CSV Template"** to inspect its structure.
+
+### 5.4 Dataset Manager UI Tabs & Export API
+The Dataset Manager interface ([http://localhost:5173/datasets](http://localhost:5173/datasets)) provides five dedicated functional tabs:
+1. **Presets & Overview**: Interactive switcher cards for the 4 presets with live volume and risk distribution charts.
+2. **Live Transaction Ledger**: Full searchable and filterable ledger with Channel filters (`WIRE`, `UPI`, `SWIFT`, `CARD`, `RTGS`, etc.), Risk Status filters (`COMPLETED`, `FLAGGED`, `REJECTED`, `PENDING`), pagination, and exact amounts.
+3. **Accounts & Entities**: Grid view of all customer and corporate accounts, showing available balances, IFSC routing codes, branches, and account types.
+4. **Regulatory Dossiers**: View the compliance examination dossiers, Suspicious Transaction Reports (STRs), and liquidity clearing filings generated for the active dataset.
+5. **Import Custom / Kaggle CSV**: Drag-and-drop zone with instant schema mapping documentation and sample dataset quick-loaders.
+6. **One-Click Export**: Click **"Export CSV"** in the top action bar or call `GET /api/dataset/export?format=csv` (or `format=json`) to export the active dataset ledger.
+
+---
+
+## 6. Troubleshooting & IntelliJ Gotchas
 
 | Issue | Root Cause | Solution |
 | :--- | :--- | :--- |

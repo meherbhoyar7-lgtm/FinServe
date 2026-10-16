@@ -4,6 +4,7 @@ import { Search, BookOpen, ExternalLink } from 'lucide-react'
 
 const navLinks = [
   { path: '/', label: 'Overview', end: true },
+  { path: '/datasets', label: 'Datasets' },
   { path: '/module1', label: 'Transaction Search' },
   { path: '/module2', label: 'Document Archival' },
   { path: '/module3', label: 'Data Cleansing' },

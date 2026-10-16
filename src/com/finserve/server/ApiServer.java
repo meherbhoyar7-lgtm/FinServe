@@ -5,6 +5,7 @@ import com.sun.net.httpserver.HttpHandler;
 import com.sun.net.httpserver.HttpExchange;
 import com.finserve.model.*;
 import com.finserve.data.SampleDataGenerator;
+import com.finserve.data.DatasetManager;
 import com.finserve.util.JsonUtil;
 import com.finserve.module1_string.*;
 import com.finserve.module2_suffix.*;
@@ -25,17 +26,13 @@ import java.util.*;
 public class ApiServer {
 
     private HttpServer server;
-    private List<Transaction> transactions;
-    private List<Account> accounts;
-    private List<FinancialDocument> documents;
+    private DatasetManager datasetManager;
 
     public ApiServer(int port) throws IOException {
         server = HttpServer.create(new InetSocketAddress(port), 0);
 
-        // Generate sample data
-        transactions = SampleDataGenerator.generateTransactions(100);
-        accounts = SampleDataGenerator.generateAccounts(20);
-        documents = SampleDataGenerator.generateDocuments();
+        // Initialize the central dataset manager (loads default dataset)
+        datasetManager = DatasetManager.getInstance();
 
         // Register API endpoints
         registerEndpoints();
@@ -43,39 +40,208 @@ public class ApiServer {
         server.setExecutor(null);
     }
 
+    // Convenience accessors that always read from the active dataset
+    private List<Transaction> getTransactions() { return datasetManager.getTransactions(); }
+    private List<Account> getAccounts() { return datasetManager.getAccounts(); }
+    private List<FinancialDocument> getDocuments() { return datasetManager.getDocuments(); }
+
     private void registerEndpoints() {
+        // Health check
+        // ===== DATASET MANAGEMENT ENDPOINTS =====
+
+        server.createContext("/api/dataset/presets", exchange -> {
+            Map<String, Object> resp = new LinkedHashMap<>();
+            resp.put("presets", DatasetManager.getAvailablePresets());
+            resp.put("activeDatasetId", datasetManager.getActiveDatasetId());
+            sendJson(exchange, resp);
+        });
+
+        server.createContext("/api/dataset/active", exchange -> {
+            sendJson(exchange, datasetManager.getSummary());
+        });
+
+        server.createContext("/api/dataset/switch", exchange -> {
+            Map<String, String> params = parseBody(exchange);
+            String presetId = params.getOrDefault("presetId", "default");
+            datasetManager.loadPreset(presetId);
+            Map<String, Object> resp = new LinkedHashMap<>();
+            resp.put("success", true);
+            resp.put("message", "Switched to dataset: " + datasetManager.getActiveDatasetName());
+            resp.put("dataset", datasetManager.getSummary());
+            sendJson(exchange, resp);
+        });
+
+        server.createContext("/api/dataset/upload", exchange -> {
+            // Read the raw body
+            InputStream bodyStream = exchange.getRequestBody();
+            byte[] bodyBytes = bodyStream.readAllBytes();
+            String body = new String(bodyBytes, StandardCharsets.UTF_8).trim();
+
+            Map<String, Object> resp = new LinkedHashMap<>();
+            try {
+                List<Transaction> uploaded;
+                String datasetName = "Custom Uploaded Dataset";
+
+                if (body.startsWith("[")) {
+                    // JSON array of transactions
+                    uploaded = DatasetManager.parseJsonTransactions(body);
+                } else if (body.startsWith("{")) {
+                    // JSON object with optional name and data fields
+                    Map<String, String> wrapper = JsonUtil.parseJsonObject(body);
+                    datasetName = wrapper.getOrDefault("name", datasetName);
+                    String data = wrapper.getOrDefault("data", "");
+                    if (data.startsWith("[")) {
+                        uploaded = DatasetManager.parseJsonTransactions(data);
+                    } else {
+                        uploaded = DatasetManager.parseCSV(data);
+                    }
+                } else {
+                    // Treat as CSV
+                    uploaded = DatasetManager.parseCSV(body);
+                }
+
+                if (uploaded.isEmpty()) {
+                    resp.put("success", false);
+                    resp.put("error", "No valid transactions could be parsed from the uploaded data.");
+                } else {
+                    datasetManager.loadCustomDataset(datasetName, uploaded, null, null);
+                    resp.put("success", true);
+                    resp.put("message", "Loaded " + uploaded.size() + " transactions from upload.");
+                    resp.put("dataset", datasetManager.getSummary());
+                }
+            } catch (Exception e) {
+                resp.put("success", false);
+                resp.put("error", "Failed to parse uploaded data: " + e.getMessage());
+            }
+            sendJson(exchange, resp);
+        });
+
+        server.createContext("/api/dataset/transactions", exchange -> {
+            Map<String, String> params = parseBody(exchange);
+            String search = params.getOrDefault("search", "").toLowerCase().trim();
+            String type = params.getOrDefault("type", "").toUpperCase().trim();
+            String status = params.getOrDefault("status", "").toUpperCase().trim();
+            int page = 1;
+            int limit = 25;
+            try { page = Math.max(1, Integer.parseInt(params.getOrDefault("page", "1"))); } catch (Exception ignored) {}
+            try { limit = Math.max(5, Math.min(500, Integer.parseInt(params.getOrDefault("limit", "25")))); } catch (Exception ignored) {}
+
+            List<Transaction> all = getTransactions();
+            List<Transaction> filtered = new ArrayList<>();
+            for (Transaction t : all) {
+                if (!type.isEmpty() && !type.equals("ALL") && !t.getTransactionType().equalsIgnoreCase(type)) continue;
+                if (!status.isEmpty() && !status.equals("ALL") && !t.getStatus().equalsIgnoreCase(status)) continue;
+                if (!search.isEmpty()) {
+                    boolean matches = (t.getTransactionId() != null && t.getTransactionId().toLowerCase().contains(search)) ||
+                                      (t.getSenderAccount() != null && t.getSenderAccount().toLowerCase().contains(search)) ||
+                                      (t.getReceiverAccount() != null && t.getReceiverAccount().toLowerCase().contains(search)) ||
+                                      (t.getDescription() != null && t.getDescription().toLowerCase().contains(search)) ||
+                                      (t.getPaymentCode() != null && t.getPaymentCode().toLowerCase().contains(search));
+                    if (!matches) continue;
+                }
+                filtered.add(t);
+            }
+
+            int total = filtered.size();
+            int totalPages = Math.max(1, (int) Math.ceil((double) total / limit));
+            int from = Math.min((page - 1) * limit, total);
+            int to = Math.min(from + limit, total);
+            List<Transaction> pageItems = filtered.subList(from, to);
+
+            StringBuilder json = new StringBuilder("{");
+            json.append("\"total\":").append(total).append(",");
+            json.append("\"page\":").append(page).append(",");
+            json.append("\"limit\":").append(limit).append(",");
+            json.append("\"totalPages\":").append(totalPages).append(",");
+            json.append("\"transactions\":[");
+            for (int i = 0; i < pageItems.size(); i++) {
+                if (i > 0) json.append(",");
+                json.append(pageItems.get(i).toJson());
+            }
+            json.append("]}");
+            sendRawJson(exchange, json.toString());
+        });
+
+        server.createContext("/api/dataset/accounts", exchange -> {
+            List<Account> accts = getAccounts();
+            StringBuilder json = new StringBuilder("{");
+            json.append("\"total\":").append(accts.size()).append(",");
+            json.append("\"accounts\":[");
+            for (int i = 0; i < accts.size(); i++) {
+                if (i > 0) json.append(",");
+                json.append(accts.get(i).toJson());
+            }
+            json.append("]}");
+            sendRawJson(exchange, json.toString());
+        });
+
+        server.createContext("/api/dataset/documents", exchange -> {
+            List<FinancialDocument> docs = getDocuments();
+            StringBuilder json = new StringBuilder("{");
+            json.append("\"total\":").append(docs.size()).append(",");
+            json.append("\"documents\":[");
+            for (int i = 0; i < docs.size(); i++) {
+                if (i > 0) json.append(",");
+                json.append(docs.get(i).toJson());
+            }
+            json.append("]}");
+            sendRawJson(exchange, json.toString());
+        });
+
+        server.createContext("/api/dataset/export", exchange -> {
+            Map<String, String> params = parseBody(exchange);
+            String format = params.getOrDefault("format", "csv").toLowerCase();
+            List<Transaction> txns = getTransactions();
+
+            if ("json".equals(format)) {
+                StringBuilder json = new StringBuilder("[");
+                for (int i = 0; i < txns.size(); i++) {
+                    if (i > 0) json.append(",");
+                    json.append(txns.get(i).toJson());
+                }
+                json.append("]");
+                sendRawJson(exchange, json.toString());
+            } else {
+                StringBuilder csv = new StringBuilder("TransactionID,SenderAccount,ReceiverAccount,Amount,Description,PaymentCode,TransactionType,Status,Timestamp,Currency\n");
+                for (Transaction t : txns) {
+                    csv.append(escapeCsv(t.getTransactionId())).append(",");
+                    csv.append(escapeCsv(t.getSenderAccount())).append(",");
+                    csv.append(escapeCsv(t.getReceiverAccount())).append(",");
+                    csv.append(t.getAmount()).append(",");
+                    csv.append(escapeCsv(t.getDescription())).append(",");
+                    csv.append(escapeCsv(t.getPaymentCode())).append(",");
+                    csv.append(escapeCsv(t.getTransactionType())).append(",");
+                    csv.append(escapeCsv(t.getStatus())).append(",");
+                    csv.append(t.getTimestamp() != null ? t.getTimestamp().toString() : "").append(",");
+                    csv.append(escapeCsv(t.getCurrency())).append("\n");
+                }
+                byte[] bytes = csv.toString().getBytes(StandardCharsets.UTF_8);
+                exchange.getResponseHeaders().set("Content-Type", "text/csv; charset=UTF-8");
+                exchange.getResponseHeaders().set("Content-Disposition", "attachment; filename=\"finserve_dataset.csv\"");
+                exchange.getResponseHeaders().set("Access-Control-Allow-Origin", "*");
+                exchange.sendResponseHeaders(200, bytes.length);
+                OutputStream os = exchange.getResponseBody();
+                os.write(bytes);
+                os.close();
+            }
+        });
+
         // Health check
         server.createContext("/api/health", exchange -> {
             Map<String, Object> resp = new LinkedHashMap<>();
             resp.put("status", "running");
             resp.put("platform", "FinServe - Intelligent Banking Analytics");
             resp.put("modules", 6);
-            resp.put("transactions", transactions.size());
-            resp.put("accounts", accounts.size());
-            resp.put("documents", documents.size());
+            resp.put("activeDataset", datasetManager.getActiveDatasetName());
+            resp.put("transactions", getTransactions().size());
+            resp.put("accounts", getAccounts().size());
+            resp.put("documents", getDocuments().size());
             sendJson(exchange, resp);
         });
 
         // Sample data endpoint
         server.createContext("/api/data/summary", exchange -> {
-            Map<String, Object> resp = new LinkedHashMap<>();
-            resp.put("totalTransactions", transactions.size());
-            resp.put("totalAccounts", accounts.size());
-            resp.put("totalDocuments", documents.size());
-
-            List<Map<String, Object>> txnSample = new ArrayList<>();
-            for (int i = 0; i < Math.min(10, transactions.size()); i++) {
-                Map<String, Object> t = new LinkedHashMap<>();
-                Transaction txn = transactions.get(i);
-                t.put("id", txn.getTransactionId());
-                t.put("description", txn.getDescription());
-                t.put("amount", txn.getAmount());
-                t.put("type", txn.getTransactionType());
-                t.put("status", txn.getStatus());
-                txnSample.add(t);
-            }
-            resp.put("sampleTransactions", txnSample);
-            sendJson(exchange, resp);
+            sendJson(exchange, datasetManager.getSummary());
         });
 
         // ===== MODULE 1: String Algorithms =====
@@ -83,21 +249,21 @@ public class ApiServer {
         server.createContext("/api/module1/search-code", exchange -> {
             Map<String, String> params = parseBody(exchange);
             String code = params.getOrDefault("query", "PAY-2024");
-            Map<String, Object> result = TransactionCodeSearch.searchTransactionCode(transactions, code);
+            Map<String, Object> result = TransactionCodeSearch.searchTransactionCode(getTransactions(), code);
             sendJson(exchange, result);
         });
 
         server.createContext("/api/module1/analyze-patterns", exchange -> {
             Map<String, String> params = parseBody(exchange);
             String pattern = params.getOrDefault("query", "payment");
-            Map<String, Object> result = PatternAnalyzer.analyzePatterns(transactions, pattern);
+            Map<String, Object> result = PatternAnalyzer.analyzePatterns(getTransactions(), pattern);
             sendJson(exchange, result);
         });
 
         server.createContext("/api/module1/lookup-code", exchange -> {
             Map<String, String> params = parseBody(exchange);
             String code = params.getOrDefault("query", "SWIFT");
-            Map<String, Object> result = FinancialCodeLookup.lookupFinancialCode(transactions, code);
+            Map<String, Object> result = FinancialCodeLookup.lookupFinancialCode(getTransactions(), code);
             sendJson(exchange, result);
         });
 
@@ -111,7 +277,7 @@ public class ApiServer {
                 patterns = patternsStr.split(",");
                 for (int i = 0; i < patterns.length; i++) patterns[i] = patterns[i].trim();
             }
-            Map<String, Object> result = FraudPatternDetector.detectFraudPatterns(transactions, patterns);
+            Map<String, Object> result = FraudPatternDetector.detectFraudPatterns(getTransactions(), patterns);
             sendJson(exchange, result);
         });
 
@@ -120,7 +286,7 @@ public class ApiServer {
         server.createContext("/api/module2/index-transactions", exchange -> {
             Map<String, String> params = parseBody(exchange);
             String query = params.getOrDefault("query", "transfer");
-            String corpus = SampleDataGenerator.buildTransactionCorpus(transactions);
+            String corpus = SampleDataGenerator.buildTransactionCorpus(getTransactions());
             Map<String, Object> result = TransactionIndexer.indexAndSearch(corpus, query);
             sendJson(exchange, result);
         });
@@ -129,7 +295,7 @@ public class ApiServer {
             Map<String, String> params = parseBody(exchange);
             String query = params.getOrDefault("query", "compliance");
             StringBuilder allDocs = new StringBuilder();
-            for (FinancialDocument doc : documents) {
+            for (FinancialDocument doc : getDocuments()) {
                 allDocs.append(doc.getContent()).append(" ");
             }
             Map<String, Object> result = DocumentIndexer.indexDocument(allDocs.toString(), query);
@@ -137,7 +303,7 @@ public class ApiServer {
         });
 
         server.createContext("/api/module2/find-patterns", exchange -> {
-            String corpus = SampleDataGenerator.buildTransactionCorpus(transactions);
+            String corpus = SampleDataGenerator.buildTransactionCorpus(getTransactions());
             Map<String, Object> result = RepeatedPatternFinder.findRepeatedPatterns(corpus);
             sendJson(exchange, result);
         });
@@ -146,7 +312,7 @@ public class ApiServer {
             Map<String, String> params = parseBody(exchange);
             String query = params.getOrDefault("query", "suspicious");
             StringBuilder allDocs = new StringBuilder();
-            for (FinancialDocument doc : documents) {
+            for (FinancialDocument doc : getDocuments()) {
                 allDocs.append(doc.getContent()).append(" ");
             }
             Map<String, Object> result = SubstringQueryEngine.querySubstrings(allDocs.toString(), query);
@@ -330,6 +496,14 @@ public class ApiServer {
         return params;
     }
 
+    private String escapeCsv(String s) {
+        if (s == null) return "";
+        if (s.contains(",") || s.contains("\"") || s.contains("\n")) {
+            return "\"" + s.replace("\"", "\"\"") + "\"";
+        }
+        return s;
+    }
+
     private void sendJson(HttpExchange exchange, Map<String, Object> data) throws IOException {
         String json = JsonUtil.toJson(data);
         sendRawJson(exchange, json);
@@ -381,10 +555,11 @@ public class ApiServer {
         System.out.println("║   API Server:  http://localhost:" + port + "                 ║");
         System.out.println("║   Swagger UI:  http://localhost:" + port + "/swagger         ║");
         System.out.println("╚══════════════════════════════════════════════════════╝");
-        System.out.println("  Loaded: " + transactions.size() + " transactions, " +
-            accounts.size() + " accounts, " + documents.size() + " documents");
+        System.out.println("  Dataset: " + datasetManager.getActiveDatasetName());
+        System.out.println("  Loaded: " + getTransactions().size() + " transactions, " +
+            getAccounts().size() + " accounts, " + getDocuments().size() + " documents");
         System.out.println("  Modules: M1(String) M2(Suffix) M3(DP) M4(Flow) M5(NP) M6(Rand/Parallel)");
-        System.out.println("  Endpoints: /api/module[1-6]/*  |  Docs: /swagger");
+        System.out.println("  Endpoints: /api/module[1-6]/*  |  /api/dataset/*  |  Docs: /swagger");
     }
 
     public void stop() {
